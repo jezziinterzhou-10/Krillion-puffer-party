@@ -1,0 +1,249 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puffer Party Friends Edition</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#102b46;color:white;font-family:Arial,sans-serif;text-align:center;padding:25px}
+main{max-width:650px;margin:auto}
+h1{font-size:42px;color:#72e5ee;margin-bottom:5px}
+.subtitle{color:#b8dce8;margin-bottom:25px}
+.panel{background:#194365;padding:22px;border-radius:18px;margin:15px 0}
+input{padding:13px;border-radius:9px;border:0;width:100%;font-size:17px;margin:8px 0}
+button{padding:13px 19px;border:0;border-radius:10px;background:#65e0df;color:#102b46;font-weight:bold;font-size:16px;margin:6px;cursor:pointer}
+button:disabled{opacity:.4}
+.secondary{background:#f6c96a}
+.player{background:#285879;padding:12px;margin:7px;border-radius:9px;display:flex;justify-content:space-between;align-items:center}
+.dead{opacity:.4;text-decoration:line-through}
+#status{color:#a6e9ef;min-height:24px}
+#timer{font-size:65px;font-weight:bold;color:#ffcf6c}
+#room{font-size:30px;letter-spacing:5px;color:#ffcf6c}
+.hidden{display:none}
+small{color:#c4d9e5}
+</style>
+</head>
+<body>
+<main>
+<h1>🐡 PUFFER PARTY</h1>
+<div class="subtitle">FRIENDS EDITION · ONLINE MULTIPLAYER</div>
+<div id="status">Ready to play?</div>
+
+<section id="home" class="panel">
+<h2>Welcome to Puffer Party!</h2>
+<input id="username" maxlength="16" placeholder="Enter your username">
+<button onclick="createParty()">Create Party</button>
+<hr>
+<input id="roomInput" maxlength="12" placeholder="Enter room code">
+<button class="secondary" onclick="joinParty()">Join Party</button>
+</section>
+
+<section id="lobby" class="panel hidden">
+<h2>Party Lobby</h2>
+<div>ROOM CODE</div>
+<div id="room">------</div>
+<button onclick="copyLink()">Copy game link</button>
+<h3>Players <span id="count">0</span>/12</h3>
+<div id="players"></div>
+<button id="start" onclick="startGame()">START GAME</button>
+<button class="secondary" onclick="leaveParty()">Leave party</button>
+</section>
+
+<section id="game" class="panel hidden">
+<h2 id="round">Round 1</h2>
+<div id="category">Category challenge</div>
+<p>Think of an answer before the timer runs out!</p>
+<div id="timer">30</div>
+<div id="gamePlayers"></div>
+<div id="hostControls" class="hidden">
+<p>Choose a player to eliminate:</p>
+<div id="eliminateButtons"></div>
+<button onclick="nextRound()">NEXT ROUND</button>
+</div>
+</section>
+
+<section id="finished" class="panel hidden">
+<h2>🏆 GAME OVER!</h2>
+<h1 id="winner"></h1>
+<button onclick="rematch()">PLAY AGAIN</button>
+</section>
+</main>
+
+<script>
+const categories=[
+"Animals","Football players","Countries","Food","Movies",
+"Things at school","Video games","Sports","Famous people",
+"Things that are blue","Brands","Things in the ocean"
+];
+
+let peer=null, connections=[], hostConn=null;
+let isHost=false, roomCode="", playerId="";
+let myName="", state=null, timerInterval=null;
+
+const $=id=>document.getElementById(id);
+function status(t){$("status").textContent=t}
+function show(id){
+["home","lobby","game","finished"].forEach(x=>$(x).classList.add("hidden"));
+$(id).classList.remove("hidden");
+}
+function makeCode(){
+return "PUFFER"+Math.floor(1000+Math.random()*9000);
+}
+function send(conn,msg){try{conn.send(msg)}catch(e){}}
+function broadcast(msg){
+connections.forEach(c=>{if(c.open)send(c,msg)});
+}
+function publish(){
+render();
+broadcast({type:"state",state});
+}
+function render(){
+if(!state)return;
+$("room").textContent=roomCode;
+$("count").textContent=state.players.length;
+$("players").innerHTML=state.players.map(p=>
+`<div class="player ${p.alive?"":"dead"}">
+<span>${p.name} ${p.id==="host"?"👑":""}</span>
+<span>${p.alive?"🟢":"❌"}</span></div>`).join("");
+if(!state.started){show("lobby");return}
+if(state.finished){
+show("finished");
+$("winner").textContent=state.winner||"Nobody";
+return;
+}
+show("game");
+$("round").textContent="Round "+state.round;
+$("category").textContent=state.category;
+$("hostControls").classList.toggle("hidden",!isHost);
+$("gamePlayers").innerHTML=state.players.map(p=>
+`<div class="player ${p.alive?"":"dead"}">${p.name} ${p.alive?"🟢":"❌"}</div>`).join("");
+$("eliminateButtons").innerHTML=state.players.filter(p=>p.alive).map(p=>
+`<button class="secondary" onclick="eliminate('${p.id}')">${p.name}</button>`).join("");
+updateTimer();
+}
+function updateTimer(){
+if(!state||!state.started||state.finished)return;
+let remaining=Math.max(0,Math.ceil((state.deadline-Date.now())/1000));
+$("timer").textContent=remaining;
+if(remaining===0&&isHost&&!state.timeUp){
+state.timeUp=true;
+publish();
+}
+}
+function startClock(){
+clearInterval(timerInterval);
+timerInterval=setInterval(updateTimer,250);
+}
+function newRound(){
+state.round++;
+state.category=categories[Math.floor(Math.random()*categories.length)];
+state.deadline=Date.now()+30000;
+state.timeUp=false;
+}
+function createParty(){
+myName=$("username").value.trim();
+if(!myName)return status("Enter a username first.");
+isHost=true;roomCode=makeCode();playerId="host";
+state={players:[{id:"host",name:myName,alive:true}],
+started:false,finished:false,round:0,category:"",deadline:0};
+status("Creating your party...");
+peer=new Peer(roomCode);
+peer.on("open",()=>{
+status("Party created! Send your friends the code.");
+render();
+});
+peer.on("connection",conn=>{
+connections.push(conn);
+conn.on("data",msg=>{
+if(msg.type==="join"&&state.players.length<12){
+if(state.players.some(p=>p.id===conn.peer))return;
+state.players.push({id:conn.peer,name:msg.name,alive:true});
+publish();
+}
+});
+conn.on("close",()=>{
+state.players=state.players.filter(p=>p.id!==conn.peer);
+connections=connections.filter(c=>c!==conn);
+publish();
+});
+conn.on("open",()=>send(conn,{type:"state",state}));
+});
+peer.on("error",e=>status("Connection error: "+e.type+". Try creating another party."));
+}
+function joinParty(){
+myName=$("username").value.trim();
+roomCode=$("roomInput").value.trim().toUpperCase();
+if(!myName||!roomCode)return status("Enter your username and room code.");
+isHost=false;
+status("Connecting to party...");
+peer=new Peer();
+peer.on("open",id=>{
+playerId=id;
+hostConn=peer.connect(roomCode,{reliable:true});
+hostConn.on("open",()=>{
+send(hostConn,{type:"join",name:myName});
+status("Connected to party!");
+});
+hostConn.on("data",msg=>{
+if(msg.type==="state"){state=msg.state;render();if(state.started)startClock();}
+});
+hostConn.on("close",()=>status("Host disconnected."));
+});
+peer.on("error",e=>status("Couldn't join. Check the code and try again."));
+}
+function startGame(){
+if(!isHost||!state||state.players.length<2)
+return status("You need at least 2 players.");
+state.started=true;
+newRound();
+publish();
+startClock();
+}
+function eliminate(id){
+if(!isHost||!state)return;
+let p=state.players.find(x=>x.id===id);
+if(!p)return;
+p.alive=false;
+let alive=state.players.filter(x=>x.alive);
+if(alive.length<=1){
+state.finished=true;
+state.winner=alive.length?alive[0].name:"Nobody";
+}else if(state.timeUp){
+newRound();
+}
+publish();
+}
+function nextRound(){
+if(!isHost||!state)return;
+newRound();
+publish();
+}
+function rematch(){
+if(!isHost)return status("The host must start the rematch.");
+state.players.forEach(p=>p.alive=true);
+state.started=false;
+state.finished=false;
+state.round=0;
+state.winner="";
+publish();
+}
+function copyLink(){
+navigator.clipboard.writeText(location.href)
+.then(()=>status("Game link copied!"))
+.catch(()=>status("Copy the website address from your browser."));
+}
+function leaveParty(){
+clearInterval(timerInterval);
+if(hostConn)hostConn.close();
+if(peer)peer.destroy();
+peer=null;connections=[];hostConn=null;
+state=null;isHost=false;roomCode="";
+show("home");
+status("You left the party.");
+}
+</script>
+</body>
+</html>
